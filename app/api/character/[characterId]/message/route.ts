@@ -1,10 +1,11 @@
 import { Prisma } from "@/app/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { NextRequest, NextResponse } from "next/server";
-import { Chat, GoogleGenAI } from "@google/genai";
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+import Groq from "groq-sdk";
 
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+
+const groq = new Groq({ apiKey: GROQ_API_KEY });
 
 export const GET = async (req: NextRequest, { params }: { params: Promise<{ characterId: string }> }) => {
   const { characterId } = await params;
@@ -40,57 +41,72 @@ export const POST = async (req: NextRequest, { params }: { params: Promise<{ cha
     },
   });
 
-  let chat: Chat | undefined;
+  // Build chat history for Groq
+  const chatHistory: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+    {
+      role: "system",
+      content: character.basePrompt,
+    },
+    {
+      role: "assistant",
+      content: character.greetingText,
+    },
+  ];
 
-  // CHATLAAGUI BOL SETUP HIIH HESEG
-  if (messages.length === 0) {
-    chat = ai.chats.create({
-      model: "gemini-2.0-flash",
-      history: [
-        { role: "user", parts: [{ text: character.basePrompt }] },
-        { role: "model", parts: [{ text: character.greetingText }] },
-      ],
+  // Add previous messages to history
+  messages.forEach((message) => {
+    chatHistory.push({
+      role: message.role === "model" ? "assistant" : (message.role as "user"),
+      content: message.content,
     });
-  } else {
-    const history = [
-      { role: "user", parts: [{ text: character.basePrompt }] },
-      { role: "model", parts: [{ text: character.greetingText }] },
-    ];
+  });
 
-    messages.forEach((message) => {
-      history.push({ role: message.role, parts: [{ text: message.content }] });
+  // Add the new user message
+  chatHistory.push({
+    role: "user",
+    content,
+  });
+
+  try {
+    // Call Groq API
+    const chatResponse = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile", // Fast and powerful free model
+      messages: chatHistory,
+      temperature: 0.7,
+      max_tokens: 1024,
     });
 
-    chat = ai.chats.create({
-      model: "gemini-2.0-flash",
-      history,
+    const aiResponse = chatResponse.choices[0]?.message?.content || "Sorry, I couldn't generate a response.";
+
+    // Save user message
+    await prisma.message.create({
+      data: {
+        character: {
+          connect: {
+            id: characterId,
+          },
+        },
+        content,
+        role: "user",
+      },
     });
+
+    // Save AI response
+    await prisma.message.create({
+      data: {
+        character: {
+          connect: {
+            id: characterId,
+          },
+        },
+        content: aiResponse,
+        role: "model",
+      },
+    });
+
+    return NextResponse.json({ message: aiResponse });
+  } catch (error: any) {
+    console.error("Groq API error:", error);
+    return NextResponse.json({ error: error.message || "Failed to generate response" }, { status: 500 });
   }
-
-  const chatResponse = await chat.sendMessage({
-    message: content,
-  });
-  await prisma.message.create({
-    data: {
-      character: {
-        connect: {
-          id: characterId,
-        },
-      },
-      content,
-      role: "user",
-    },
-  });
-  await prisma.message.create({
-    data: {
-      character: {
-        connect: {
-          id: characterId,
-        },
-      },
-      content: chatResponse.text!,
-      role: "model",
-    },
-  });
-  return NextResponse.json({ message: chatResponse.text! });
 };
